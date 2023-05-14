@@ -1,3 +1,5 @@
+use std::io::{Cursor, Error, ErrorKind, Read};
+
 /// TYPE fields are used in resource records.  Note that these
 /// types are a subset of QTYPEs.
 /// See https://datatracker.ietf.org/doc/html/rfc1035#section-3.2.2
@@ -43,6 +45,36 @@ impl TypeField {
     fn to_be_bytes(self) -> [u8; 2] {
         (self as u16).to_be_bytes()
     }
+
+    fn from_bytes(data: &[u8]) -> Result<Self, std::io::Error> {
+        let bytes = data.try_into().map_err(|_| ErrorKind::InvalidInput)?;
+        let num = u16::from_be_bytes(bytes);
+        match num {
+            1 => Ok(TypeField::A),
+            2 => Ok(TypeField::NS),
+            3 => Ok(TypeField::MD),
+            4 => Ok(TypeField::MF),
+            5 => Ok(TypeField::CNAME),
+            6 => Ok(TypeField::SOA),
+            7 => Ok(TypeField::MB),
+            8 => Ok(TypeField::MG),
+            9 => Ok(TypeField::MR),
+            10 => Ok(TypeField::NULL),
+            11 => Ok(TypeField::WKS),
+            12 => Ok(TypeField::PTR),
+            13 => Ok(TypeField::HINFO),
+            14 => Ok(TypeField::MINFO),
+            15 => Ok(TypeField::MX),
+            16 => Ok(TypeField::TXT),
+            _ => Err(Error::new(ErrorKind::Other, "Invalid TYPE field")),
+        }
+    }
+
+    fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let mut bytes = [0u8; 2];
+        reader.read_exact(&mut bytes)?;
+        TypeField::from_bytes(&bytes)
+    }
 }
 
 /// CLASS fields appear in resource records.
@@ -64,7 +96,28 @@ impl ClassField {
     fn to_be_bytes(self) -> [u8; 2] {
         (self as u16).to_be_bytes()
     }
+
+    fn from_bytes(data: &[u8]) -> Result<Self, std::io::Error> {
+        let bytes = data.try_into().map_err(|_| ErrorKind::InvalidInput)?;
+        let num = u16::from_be_bytes(bytes);
+        match num {
+            1 => Ok(ClassField::IN),
+            2 => Ok(ClassField::CS),
+            3 => Ok(ClassField::CH),
+            4 => Ok(ClassField::HS),
+            _ => Err(Error::new(ErrorKind::Other, "Invalid CLASS field")),
+        }
+    }
+
+    fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let mut bytes = [0u8; 2];
+        reader.read_exact(&mut bytes)?;
+        ClassField::from_bytes(&bytes)
+    }
 }
+
+const DNS_HEADER_SIZE: usize = 12;
+
 #[derive(Debug)]
 pub struct DNSHeader {
     pub id: u16,
@@ -86,46 +139,192 @@ impl DNSHeader {
         bytes
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, std::io::Error> {
+        let id = u16::from_be_bytes(bytes[0..2].try_into().unwrap());
+        let flags = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
+        let num_questions = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
+        let num_answers = u16::from_be_bytes(bytes[6..8].try_into().unwrap());
+        let num_authorities = u16::from_be_bytes(bytes[8..10].try_into().unwrap());
+        let num_additionals = u16::from_be_bytes(bytes[10..12].try_into().unwrap());
+
+        Ok(DNSHeader {
+            id,
+            flags,
+            num_questions,
+            num_answers,
+            num_authorities,
+            num_additionals,
+        })
+    }
+
+    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let mut bytes: [u8; DNS_HEADER_SIZE] = [0; DNS_HEADER_SIZE];
+        reader.read_exact(&mut bytes)?;
+        DNSHeader::from_bytes(&bytes)
+    }
 }
 
 #[derive(Debug)]
 pub struct DNSQuestion {
-    pub name: Vec<u8>,
+    pub name: DomainName,
     pub type_field: TypeField,
     pub class: ClassField,
 }
 impl DNSQuestion {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.name);
+        bytes.extend_from_slice(&self.name.to_bytes());
         bytes.extend_from_slice(&self.type_field.to_be_bytes());
         bytes.extend_from_slice(&self.class.to_be_bytes());
         bytes
     }
+
+    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let name = DomainName::from_reader(reader)?;
+        let type_field = TypeField::from_reader(reader)?;
+        let class = ClassField::from_reader(reader)?;
+
+        Ok(DNSQuestion {
+            name,
+            type_field,
+            class,
+        })
+    }
 }
 
 #[derive(Debug)]
-pub struct DomainName(String);
+pub struct DomainName {
+    bytes: Vec<u8>,
+    string: String,
+}
 
 impl DomainName {
     pub fn from(domain_name: &str) -> Self {
-        DomainName(String::from(domain_name))
+        let string = String::from(domain_name);
+        DomainName {
+            string: string.clone(),
+            bytes: string.into_bytes(),
+        }
     }
 
+    /// TODO rename as this is not simply converting to bytes, but it's actually
+    /// encoding the domain name for DNS questions
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
-        for part in self.0.split(".") {
+        for part in self.string.split(".") {
             bytes.push(part.len() as u8);
             bytes.extend_from_slice(part.as_bytes());
         }
         bytes.push(0);
         bytes
     }
+
+    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut should_read = true;
+        while should_read {
+            let mut size: [u8; 1] = [0; 1];
+            reader.read_exact(&mut size)?;
+            if size[0] > 0 {
+                let mut buf = vec![0u8; size[0] as usize];
+                reader.read_exact(&mut buf)?;
+                bytes.extend_from_slice(&buf);
+                bytes.extend_from_slice(".".as_bytes());
+            } else {
+                should_read = false
+            }
+        }
+        let string = String::from_utf8(bytes.clone()).map_err(|_| ErrorKind::InvalidData)?;
+        Ok(DomainName { bytes, string })
+    }
 }
 
-pub fn build_query(domain_name: &DomainName, type_field: TypeField) -> Vec<u8> {
-    // let id = rand::random::<u16>();
-    let id = 0x8298;
+#[derive(Debug)]
+struct DNSRecord {
+    /// the domain name
+    name: DomainName,
+    /// A, AAAA, MX, NS, TXT, etc (encoded as an integer)
+    type_field: TypeField,
+    /// always the same (1). We’ll ignore this.
+    class: ClassField,
+    /// how long to cache the query for. We’ll ignore this.
+    ttl: u32,
+    /// the record’s content, like the IP address.
+    data: Vec<u8>,
+}
+impl DNSRecord {
+    // def parse_record(reader):
+    //     name = decode_name_simple(reader)
+    //     # the the type, class, TTL, and data length together are 10 bytes (2 + 2 + 4 + 2 = 10)
+    //     # so we read 10 bytes
+    //     data = reader.read(10)
+    //     # HHIH means 2-byte int, 2-byte-int, 4-byte int, 2-byte int
+    //     type_, class_, ttl, data_len = struct.unpack("!HHIH", data)
+    //     data = reader.read(data_len)
+    //     return DNSRecord(name, type_, class_, ttl, data)
+    pub fn from_bytes(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
+        let name = DomainName::from_reader(reader)?;
+        let type_field = TypeField::from_reader(reader)?;
+        let class = ClassField::from_reader(reader)?;
+
+        let mut ttl_bytes = [0u8; 4];
+        reader.read_exact(&mut ttl_bytes)?;
+        let ttl = u32::from_be_bytes(ttl_bytes);
+
+        let mut data_len_bytes = [0u8; 2];
+        reader.read_exact(&mut data_len_bytes)?;
+
+        let data_len = u16::from_be_bytes(data_len_bytes);
+        let mut data = vec![0u8; data_len as usize];
+        reader.read_exact(&mut data)?;
+
+        Ok(DNSRecord {
+            name,
+            type_field,
+            class,
+            ttl,
+            data,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct DNSPacket {
+    header: DNSHeader,
+    questions: Vec<DNSQuestion>,
+    answers: Vec<DNSRecord>,
+    authorities: Vec<DNSRecord>,
+    additionals: Vec<DNSRecord>,
+}
+impl DNSPacket {
+    pub fn from(data: &[u8]) -> Result<Self, std::io::Error> {
+        let mut reader = Cursor::new(data);
+
+        let header = DNSHeader::from_reader(&mut reader)?;
+        println!("{:?}", header);
+
+        let question = DNSQuestion::from_reader(&mut reader)?;
+        println!("{:?}", question);
+        let questions = vec![question];
+
+        let answer = DNSRecord::from_bytes(&mut reader)?;
+        println!("{:?}", answer);
+        let answers = vec![answer];
+        let authorities = vec![];
+        let additionals = vec![];
+
+        Ok(DNSPacket {
+            header,
+            questions,
+            answers,
+            authorities,
+            additionals,
+        })
+    }
+}
+
+pub fn build_query(domain_name: DomainName, type_field: TypeField) -> Vec<u8> {
+    let id = rand::random::<u16>();
     let recursion_desired = 1 << 8;
     let header = DNSHeader {
         id,
@@ -136,7 +335,7 @@ pub fn build_query(domain_name: &DomainName, type_field: TypeField) -> Vec<u8> {
         num_additionals: 0,
     };
     let question = DNSQuestion {
-        name: domain_name.to_bytes(),
+        name: domain_name,
         type_field,
         class: ClassField::IN,
     };
