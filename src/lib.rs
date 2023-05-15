@@ -378,16 +378,19 @@ pub fn build_query(domain_name: DomainName, type_field: TypeField) -> Vec<u8> {
     bytes
 }
 
-pub fn domain_lookup(domain_name_str: &str) -> Result<DNSPacket, std::io::Error> {
-    let domain_name = DomainName::from(domain_name_str);
-    let query = build_query(domain_name, TypeField::A);
-
+fn send_query(socket_address: &str, socket_buf: &[u8]) -> Result<DNSPacket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:34254").expect("couldn't bind to address");
-    socket.connect("8.8.8.8:53")?;
-    socket.send(query.as_slice())?;
+    socket.connect(socket_address)?;
+    socket.send(socket_buf)?;
 
     let mut buf = [0; 1024];
     let (_amt, _src) = socket.recv_from(&mut buf)?;
 
     DNSPacket::from(&buf)
+}
+
+pub fn domain_lookup(domain_name_str: &str) -> Result<DNSPacket, std::io::Error> {
+    let domain_name = DomainName::from(domain_name_str);
+    let query = build_query(domain_name, TypeField::A);
+    send_query("8.8.8.8:53", query.as_slice())
 }
