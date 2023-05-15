@@ -1,4 +1,4 @@
-An incomplete port of <https://implement-dns.wizardzines.com> in Rust.
+A port of <https://implement-dns.wizardzines.com> in Rust.
 
 ## Usage
 

@@ -1,23 +1,25 @@
-use implement_dns::domain_lookup;
+use implement_dns::{resolve, DomainName};
 
 fn main() -> Result<(), std::io::Error> {
-    let example = domain_lookup("example.com")?;
-    println!("{:?}", example.answers[0].ipv4);
+    env_logger::init();
 
-    let recurse = domain_lookup("recurse.com")?;
-    println!("{:?}", recurse.answers[0].ipv4);
+    let example = resolve(
+        &DomainName::from("example.com"),
+        implement_dns::TypeField::A,
+    )?;
+    println!("{:?}", example);
 
-    let metafilter = domain_lookup("metafilter.com")?;
-    println!("{:?}", metafilter.answers[0].ipv4);
+    let google = resolve(&DomainName::from("google.com"), implement_dns::TypeField::A)?;
+    println!("{:?}", google);
 
-    let www_metafilter = domain_lookup("www.metafilter.com")?;
-    println!("{:?}", www_metafilter.answers[0].ipv4);
+    let twitter = resolve(
+        &DomainName::from("twitter.com"),
+        implement_dns::TypeField::A,
+    )?;
+    println!("{:?}", twitter);
 
-    let facebook = domain_lookup("facebook.com")?;
-    println!("{:?}", facebook.answers[0].ipv4);
-
-    let www_facebook = domain_lookup("www.facebook.com")?;
-    println!("{:?}", www_facebook.answers[0].ipv4);
+    let ennamio = resolve(&DomainName::from("ennam.io"), implement_dns::TypeField::A)?;
+    println!("{:?}", ennamio);
 
     Ok(())
 }

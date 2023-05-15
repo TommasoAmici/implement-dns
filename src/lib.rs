@@ -1,6 +1,12 @@
 use std::io::{Cursor, Error, ErrorKind, Read};
-use std::net::Ipv4Addr;
 use std::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+use ipv4::ipv4_addr_from_bytes;
+use ipv6::ipv6_addr_from_bytes;
+
+mod ipv4;
+mod ipv6;
 
 /// TYPE fields are used in resource records.  Note that these
 /// types are a subset of QTYPEs.
@@ -40,6 +46,8 @@ pub enum TypeField {
     MX = 15,
     /// text strings
     TXT = 16,
+    /// aaaa host address
+    AAAA = 28,
 }
 impl TypeField {
     /// Return the memory representation of this integer as a byte array in big-endian
@@ -68,6 +76,7 @@ impl TypeField {
             14 => Ok(TypeField::MINFO),
             15 => Ok(TypeField::MX),
             16 => Ok(TypeField::TXT),
+            28 => Ok(TypeField::AAAA),
             _ => Err(Error::new(ErrorKind::Other, "Invalid TYPE field")),
         }
     }
@@ -194,9 +203,8 @@ impl DNSQuestion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DomainName {
-    bytes: Vec<u8>,
     pub string: String,
 }
 
@@ -205,7 +213,6 @@ impl DomainName {
         let string = String::from(domain_name);
         DomainName {
             string: string.clone(),
-            bytes: string.into_bytes(),
         }
     }
 
@@ -221,10 +228,10 @@ impl DomainName {
         bytes
     }
 
-    fn from_reader_compressed(
+    fn bytes_from_reader_compressed(
         length: u8,
         reader: &mut Cursor<&[u8]>,
-    ) -> Result<Self, std::io::Error> {
+    ) -> Result<Vec<u8>, std::io::Error> {
         let mut offset_bytes: [u8; 1] = [0];
         reader.read_exact(&mut offset_bytes)?;
         let pointer_bytes: [u8; 2] = [length & 0b0011_1111, offset_bytes[0]];
@@ -232,13 +239,14 @@ impl DomainName {
 
         let curr_position = reader.position();
         reader.set_position(pointer as u64);
-        let domain_name = DomainName::from_reader(reader)?;
+        let bytes = DomainName::bytes_from_reader(reader)?;
         reader.set_position(curr_position);
-        Ok(domain_name)
+
+        Ok(bytes)
     }
 
-    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
-        let mut bytes: Vec<u8> = Vec::new();
+    fn bytes_from_reader(reader: &mut Cursor<&[u8]>) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes: Vec<Vec<u8>> = Vec::new();
         let mut should_read = true;
         while should_read {
             let mut length_bytes: [u8; 1] = [0; 1];
@@ -248,18 +256,23 @@ impl DomainName {
             // https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.4
             let is_compressed = (length & 0b1100_0000) != 0;
             if is_compressed {
-                return DomainName::from_reader_compressed(length, reader);
+                bytes.push(DomainName::bytes_from_reader_compressed(length, reader)?);
+                should_read = false;
             } else if length > 0 {
                 let mut buf = vec![0u8; length as usize];
                 reader.read_exact(&mut buf)?;
-                bytes.extend_from_slice(&buf);
-                bytes.extend_from_slice(".".as_bytes());
+                bytes.push(buf);
             } else {
-                should_read = false
+                should_read = false;
             }
         }
+        Ok(bytes.join(&u8::from(b'.')))
+    }
+
+    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
+        let bytes: Vec<u8> = DomainName::bytes_from_reader(reader)?;
         let string = String::from_utf8(bytes.clone()).map_err(|_| ErrorKind::InvalidData)?;
-        Ok(DomainName { bytes, string })
+        Ok(DomainName { string })
     }
 }
 
@@ -275,10 +288,12 @@ pub struct DNSRecord {
     pub ttl: u32,
     /// the record’s content, like the IP address.
     data: Vec<u8>,
-    pub ipv4: Vec<Ipv4Addr>,
+    pub ipv4: Option<Vec<Ipv4Addr>>,
+    pub ipv6: Option<Vec<Ipv6Addr>>,
+    pub ns_name: Option<DomainName>,
 }
 impl DNSRecord {
-    pub fn from_bytes(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
+    pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
         let name = DomainName::from_reader(reader)?;
         let type_field = TypeField::from_reader(reader)?;
         let class = ClassField::from_reader(reader)?;
@@ -292,14 +307,31 @@ impl DNSRecord {
 
         let data_len = u16::from_be_bytes(data_len_bytes);
         let mut data = vec![0u8; data_len as usize];
+        let data_position = reader.position();
         reader.read_exact(&mut data)?;
 
-        let ipv4: Vec<Ipv4Addr> = match type_field {
-            TypeField::A => data
-                .chunks(4)
-                .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
-                .collect(),
-            _ => vec![],
+        let ns_name = if type_field == TypeField::NS {
+            reader.set_position(data_position);
+            Some(DomainName::from_reader(reader)?)
+        } else {
+            None
+        };
+
+        let ipv4: Option<Vec<Ipv4Addr>> = match type_field {
+            TypeField::A => Some(
+                data.chunks(4)
+                    .map(|chunk| ipv4_addr_from_bytes(chunk))
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let ipv6: Option<Vec<Ipv6Addr>> = match type_field {
+            TypeField::AAAA => Some(
+                data.chunks(16)
+                    .map(|chunk: &[u8]| ipv6_addr_from_bytes(&chunk))
+                    .collect(),
+            ),
+            _ => None,
         };
 
         Ok(DNSRecord {
@@ -309,6 +341,8 @@ impl DNSRecord {
             ttl,
             data,
             ipv4,
+            ipv6,
+            ns_name,
         })
     }
 }
@@ -334,17 +368,17 @@ impl DNSPacket {
 
         let mut answers = vec![];
         for _ in 0..header.num_answers {
-            answers.push(DNSRecord::from_bytes(&mut reader)?);
+            answers.push(DNSRecord::from_reader(&mut reader)?);
         }
 
         let mut authorities = vec![];
         for _ in 0..header.num_authorities {
-            authorities.push(DNSRecord::from_bytes(&mut reader)?);
+            authorities.push(DNSRecord::from_reader(&mut reader)?);
         }
 
         let mut additionals = vec![];
         for _ in 0..header.num_additionals {
-            additionals.push(DNSRecord::from_bytes(&mut reader)?);
+            additionals.push(DNSRecord::from_reader(&mut reader)?);
         }
 
         Ok(DNSPacket {
@@ -355,21 +389,36 @@ impl DNSPacket {
             additionals,
         })
     }
+
+    pub fn get_answer(&self) -> Option<&DNSRecord> {
+        self.answers.iter().find(|x| x.type_field == TypeField::A)
+    }
+
+    pub fn get_nameserver_record(&self) -> Option<&DNSRecord> {
+        self.additionals
+            .iter()
+            .find(|x| x.type_field == TypeField::A)
+    }
+
+    pub fn get_nameserver(&self) -> Option<&DNSRecord> {
+        self.authorities
+            .iter()
+            .find(|x| x.type_field == TypeField::NS)
+    }
 }
 
-pub fn build_query(domain_name: DomainName, type_field: TypeField) -> Vec<u8> {
+pub fn build_query(domain_name: &DomainName, type_field: TypeField) -> Vec<u8> {
     let id = rand::random::<u16>();
-    let recursion_desired = 1 << 8;
     let header = DNSHeader {
         id,
-        flags: recursion_desired,
+        flags: 0,
         num_questions: 1,
         num_answers: 0,
         num_authorities: 0,
         num_additionals: 0,
     };
     let question = DNSQuestion {
-        name: domain_name,
+        name: domain_name.clone(),
         type_field,
         class: ClassField::IN,
     };
@@ -378,9 +427,9 @@ pub fn build_query(domain_name: DomainName, type_field: TypeField) -> Vec<u8> {
     bytes
 }
 
-fn send_query(socket_address: &str, socket_buf: &[u8]) -> Result<DNSPacket, std::io::Error> {
+fn send_query(socket_address: Ipv4Addr, socket_buf: &[u8]) -> Result<DNSPacket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:34254").expect("couldn't bind to address");
-    socket.connect(socket_address)?;
+    socket.connect(socket_address.to_string() + ":53")?;
     socket.send(socket_buf)?;
 
     let mut buf = [0; 1024];
@@ -389,8 +438,36 @@ fn send_query(socket_address: &str, socket_buf: &[u8]) -> Result<DNSPacket, std:
     DNSPacket::from(&buf)
 }
 
-pub fn domain_lookup(domain_name_str: &str) -> Result<DNSPacket, std::io::Error> {
-    let domain_name = DomainName::from(domain_name_str);
-    let query = build_query(domain_name, TypeField::A);
-    send_query("8.8.8.8:53", query.as_slice())
+pub fn resolve(
+    domain_name: &DomainName,
+    type_field: TypeField,
+) -> Result<Ipv4Addr, std::io::Error> {
+    let mut name_server = Ipv4Addr::new(198, 41, 0, 4);
+    loop {
+        log::info!("Querying {} for {}", name_server, domain_name.string);
+        let query = build_query(domain_name, type_field);
+        let packet = send_query(name_server, query.as_slice())?;
+        if let Some(answer) = packet.get_answer() {
+            if let Some(ip) = answer.ipv4.as_ref().and_then(|x| x.first()) {
+                return Ok(*ip);
+            }
+        } else if let Some(name_server_ip) = packet
+            .get_nameserver_record()
+            .and_then(|x| x.ipv4.as_ref().and_then(|x| x.first()))
+        {
+            name_server = *name_server_ip;
+        } else if let Some(ns_domain) = packet.get_nameserver().and_then(|x| x.ns_name.as_ref()) {
+            name_server = resolve(ns_domain, TypeField::A)?;
+        } else {
+            log::error!(
+                "No answer found for {} at {}",
+                domain_name.string,
+                name_server
+            );
+            return Err(Error::new(
+                ErrorKind::Other,
+                "No answer found for domain name",
+            ));
+        }
+    }
 }
