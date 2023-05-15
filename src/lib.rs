@@ -315,13 +315,25 @@ impl DNSPacket {
 
         let header = DNSHeader::from_reader(&mut reader)?;
 
-        let question = DNSQuestion::from_reader(&mut reader)?;
-        let questions = vec![question];
+        let mut questions = vec![];
+        for _ in 0..header.num_questions {
+            questions.push(DNSQuestion::from_reader(&mut reader)?);
+        }
 
-        let answer = DNSRecord::from_bytes(&mut reader)?;
-        let answers = vec![answer];
-        let authorities = vec![];
-        let additionals = vec![];
+        let mut answers = vec![];
+        for _ in 0..header.num_answers {
+            answers.push(DNSRecord::from_bytes(&mut reader)?);
+        }
+
+        let mut authorities = vec![];
+        for _ in 0..header.num_authorities {
+            authorities.push(DNSRecord::from_bytes(&mut reader)?);
+        }
+
+        let mut additionals = vec![];
+        for _ in 0..header.num_additionals {
+            additionals.push(DNSRecord::from_bytes(&mut reader)?);
+        }
 
         Ok(DNSPacket {
             header,
