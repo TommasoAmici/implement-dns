@@ -1,23 +1,23 @@
-use implement_dns::{build_query, DNSPacket, DomainName, TypeField};
-use std::net::UdpSocket;
+use implement_dns::domain_lookup;
 
 fn main() -> Result<(), std::io::Error> {
-    let response_test = hex::decode("60568180000100010000000003777777076578616d706c6503636f6d0000010001c00c000100010000529b00045db8d822").unwrap();
-    let dns_packet = DNSPacket::from(&response_test)?;
-    println!("{:?}", dns_packet);
+    let example = domain_lookup("example.com")?;
+    println!("{:?}", example.answers[0].ipv4);
 
-    let domain_name = DomainName::from("www.example.com");
-    let query = build_query(domain_name, TypeField::A);
+    let recurse = domain_lookup("recurse.com")?;
+    println!("{:?}", recurse.answers[0].ipv4);
 
-    let socket = UdpSocket::bind("0.0.0.0:34254").expect("couldn't bind to address");
-    socket.connect("8.8.8.8:53")?;
-    socket.send(query.as_slice())?;
+    let metafilter = domain_lookup("metafilter.com")?;
+    println!("{:?}", metafilter.answers[0].ipv4);
 
-    let mut buf = [0; 1024];
-    let (_amt, _src) = socket.recv_from(&mut buf)?;
+    let www_metafilter = domain_lookup("www.metafilter.com")?;
+    println!("{:?}", www_metafilter.answers[0].ipv4);
 
-    let dns_packet = DNSPacket::from(&buf)?;
-    println!("{:?}", dns_packet);
+    let facebook = domain_lookup("facebook.com")?;
+    println!("{:?}", facebook.answers[0].ipv4);
+
+    let www_facebook = domain_lookup("www.facebook.com")?;
+    println!("{:?}", www_facebook.answers[0].ipv4);
 
     Ok(())
 }

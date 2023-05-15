@@ -1,5 +1,6 @@
 use std::io::{Cursor, Error, ErrorKind, Read};
 use std::net::Ipv4Addr;
+use std::net::UdpSocket;
 
 /// TYPE fields are used in resource records.  Note that these
 /// types are a subset of QTYPEs.
@@ -196,7 +197,7 @@ impl DNSQuestion {
 #[derive(Debug)]
 pub struct DomainName {
     bytes: Vec<u8>,
-    string: String,
+    pub string: String,
 }
 
 impl DomainName {
@@ -263,15 +264,15 @@ impl DomainName {
 }
 
 #[derive(Debug)]
-struct DNSRecord {
+pub struct DNSRecord {
     /// the domain name
-    name: DomainName,
+    pub name: DomainName,
     /// A, AAAA, MX, NS, TXT, etc (encoded as an integer)
-    type_field: TypeField,
+    pub type_field: TypeField,
     /// always the same (1). We’ll ignore this.
-    class: ClassField,
+    pub class: ClassField,
     /// how long to cache the query for. We’ll ignore this.
-    ttl: u32,
+    pub ttl: u32,
     /// the record’s content, like the IP address.
     data: Vec<u8>,
     pub ipv4: Vec<Ipv4Addr>,
@@ -314,11 +315,11 @@ impl DNSRecord {
 
 #[derive(Debug)]
 pub struct DNSPacket {
-    header: DNSHeader,
-    questions: Vec<DNSQuestion>,
-    answers: Vec<DNSRecord>,
-    authorities: Vec<DNSRecord>,
-    additionals: Vec<DNSRecord>,
+    pub header: DNSHeader,
+    pub questions: Vec<DNSQuestion>,
+    pub answers: Vec<DNSRecord>,
+    pub authorities: Vec<DNSRecord>,
+    pub additionals: Vec<DNSRecord>,
 }
 impl DNSPacket {
     pub fn from(data: &[u8]) -> Result<Self, std::io::Error> {
@@ -375,4 +376,18 @@ pub fn build_query(domain_name: DomainName, type_field: TypeField) -> Vec<u8> {
     let mut bytes = header.to_bytes();
     bytes.extend_from_slice(&question.to_bytes());
     bytes
+}
+
+pub fn domain_lookup(domain_name_str: &str) -> Result<DNSPacket, std::io::Error> {
+    let domain_name = DomainName::from(domain_name_str);
+    let query = build_query(domain_name, TypeField::A);
+
+    let socket = UdpSocket::bind("0.0.0.0:34254").expect("couldn't bind to address");
+    socket.connect("8.8.8.8:53")?;
+    socket.send(query.as_slice())?;
+
+    let mut buf = [0; 1024];
+    let (_amt, _src) = socket.recv_from(&mut buf)?;
+
+    DNSPacket::from(&buf)
 }
