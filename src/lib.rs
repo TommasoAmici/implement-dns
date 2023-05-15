@@ -219,14 +219,36 @@ impl DomainName {
         bytes
     }
 
+    fn from_reader_compressed(
+        length: u8,
+        reader: &mut Cursor<&[u8]>,
+    ) -> Result<Self, std::io::Error> {
+        let mut offset_bytes: [u8; 1] = [0];
+        reader.read_exact(&mut offset_bytes)?;
+        let pointer_bytes: [u8; 2] = [length & 0b0011_1111, offset_bytes[0]];
+        let pointer = u16::from_be_bytes(pointer_bytes);
+
+        let curr_position = reader.position();
+        reader.set_position(pointer as u64);
+        let domain_name = DomainName::from_reader(reader)?;
+        reader.set_position(curr_position);
+        Ok(domain_name)
+    }
+
     pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
         let mut bytes: Vec<u8> = Vec::new();
         let mut should_read = true;
         while should_read {
-            let mut size: [u8; 1] = [0; 1];
-            reader.read_exact(&mut size)?;
-            if size[0] > 0 {
-                let mut buf = vec![0u8; size[0] as usize];
+            let mut length_bytes: [u8; 1] = [0; 1];
+            reader.read_exact(&mut length_bytes)?;
+            let length = length_bytes[0];
+            // if the first two bits are 11 it means the domain name is compressed
+            // https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.4
+            let is_compressed = (length & 0b1100_0000) != 0;
+            if is_compressed {
+                return DomainName::from_reader_compressed(length, reader);
+            } else if length > 0 {
+                let mut buf = vec![0u8; length as usize];
                 reader.read_exact(&mut buf)?;
                 bytes.extend_from_slice(&buf);
                 bytes.extend_from_slice(".".as_bytes());
@@ -253,15 +275,6 @@ struct DNSRecord {
     data: Vec<u8>,
 }
 impl DNSRecord {
-    // def parse_record(reader):
-    //     name = decode_name_simple(reader)
-    //     # the the type, class, TTL, and data length together are 10 bytes (2 + 2 + 4 + 2 = 10)
-    //     # so we read 10 bytes
-    //     data = reader.read(10)
-    //     # HHIH means 2-byte int, 2-byte-int, 4-byte int, 2-byte int
-    //     type_, class_, ttl, data_len = struct.unpack("!HHIH", data)
-    //     data = reader.read(data_len)
-    //     return DNSRecord(name, type_, class_, ttl, data)
     pub fn from_bytes(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
         let name = DomainName::from_reader(reader)?;
         let type_field = TypeField::from_reader(reader)?;
@@ -301,14 +314,11 @@ impl DNSPacket {
         let mut reader = Cursor::new(data);
 
         let header = DNSHeader::from_reader(&mut reader)?;
-        println!("{:?}", header);
 
         let question = DNSQuestion::from_reader(&mut reader)?;
-        println!("{:?}", question);
         let questions = vec![question];
 
         let answer = DNSRecord::from_bytes(&mut reader)?;
-        println!("{:?}", answer);
         let answers = vec![answer];
         let authorities = vec![];
         let additionals = vec![];
