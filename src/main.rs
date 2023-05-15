@@ -3,23 +3,17 @@ use implement_dns::{resolve, DomainName};
 fn main() -> Result<(), std::io::Error> {
     env_logger::init();
 
-    let example = resolve(
-        &DomainName::from("example.com"),
-        implement_dns::TypeField::A,
-    )?;
-    println!("{:?}", example);
+    let test_domains = vec![
+        "tommasoamici.com",
+        "google.com",
+        "twitter.com",
+        "www.facebook.com", // CNAME
+    ];
 
-    let google = resolve(&DomainName::from("google.com"), implement_dns::TypeField::A)?;
-    println!("{:?}", google);
-
-    let twitter = resolve(
-        &DomainName::from("twitter.com"),
-        implement_dns::TypeField::A,
-    )?;
-    println!("{:?}", twitter);
-
-    let ennamio = resolve(&DomainName::from("ennam.io"), implement_dns::TypeField::A)?;
-    println!("{:?}", ennamio);
+    for domain in test_domains {
+        let result = resolve(&DomainName::from(domain), implement_dns::TypeField::A);
+        println!("{:?}", result);
+    }
 
     Ok(())
 }

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{Cursor, Error, ErrorKind, Read};
 use std::net::UdpSocket;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -48,6 +49,29 @@ pub enum TypeField {
     TXT = 16,
     /// aaaa host address
     AAAA = 28,
+}
+impl fmt::Display for TypeField {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TypeField::A => write!(f, "A"),
+            TypeField::NS => write!(f, "NS"),
+            TypeField::MD => write!(f, "MD"),
+            TypeField::MF => write!(f, "MF"),
+            TypeField::CNAME => write!(f, "CNAME"),
+            TypeField::SOA => write!(f, "SOA"),
+            TypeField::MB => write!(f, "MB"),
+            TypeField::MG => write!(f, "MG"),
+            TypeField::MR => write!(f, "MR"),
+            TypeField::NULL => write!(f, "NULL"),
+            TypeField::WKS => write!(f, "WKS"),
+            TypeField::PTR => write!(f, "PTR"),
+            TypeField::HINFO => write!(f, "HINFO"),
+            TypeField::MINFO => write!(f, "MINFO"),
+            TypeField::MX => write!(f, "MX"),
+            TypeField::TXT => write!(f, "TXT"),
+            TypeField::AAAA => write!(f, "AAAA"),
+        }
+    }
 }
 impl TypeField {
     /// Return the memory representation of this integer as a byte array in big-endian
@@ -291,6 +315,7 @@ pub struct DNSRecord {
     pub ipv4: Option<Vec<Ipv4Addr>>,
     pub ipv6: Option<Vec<Ipv6Addr>>,
     pub ns_name: Option<DomainName>,
+    pub cname: Option<DomainName>,
 }
 impl DNSRecord {
     pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
@@ -317,6 +342,13 @@ impl DNSRecord {
             None
         };
 
+        let cname = if type_field == TypeField::CNAME {
+            reader.set_position(data_position);
+            Some(DomainName::from_reader(reader)?)
+        } else {
+            None
+        };
+
         let ipv4: Option<Vec<Ipv4Addr>> = match type_field {
             TypeField::A => Some(
                 data.chunks(4)
@@ -325,6 +357,7 @@ impl DNSRecord {
             ),
             _ => None,
         };
+
         let ipv6: Option<Vec<Ipv6Addr>> = match type_field {
             TypeField::AAAA => Some(
                 data.chunks(16)
@@ -343,6 +376,7 @@ impl DNSRecord {
             ipv4,
             ipv6,
             ns_name,
+            cname,
         })
     }
 }
@@ -405,6 +439,12 @@ impl DNSPacket {
             .iter()
             .find(|x| x.type_field == TypeField::NS)
     }
+
+    pub fn get_cname(&self) -> Option<&DNSRecord> {
+        self.answers
+            .iter()
+            .find(|x| x.type_field == TypeField::CNAME)
+    }
 }
 
 pub fn build_query(domain_name: &DomainName, type_field: TypeField) -> Vec<u8> {
@@ -442,22 +482,33 @@ pub fn resolve(
     domain_name: &DomainName,
     type_field: TypeField,
 ) -> Result<Ipv4Addr, std::io::Error> {
-    let mut name_server = Ipv4Addr::new(198, 41, 0, 4);
+    // K-root
+    let mut name_server = Ipv4Addr::new(193, 0, 14, 129);
     loop {
-        log::info!("Querying {} for {}", name_server, domain_name.string);
+        log::info!(
+            "Querying {} for {} {}",
+            name_server,
+            type_field,
+            domain_name.string
+        );
         let query = build_query(domain_name, type_field);
         let packet = send_query(name_server, query.as_slice())?;
-        if let Some(answer) = packet.get_answer() {
-            if let Some(ip) = answer.ipv4.as_ref().and_then(|x| x.first()) {
-                return Ok(*ip);
-            }
+        if let Some(answer) = packet
+            .get_answer()
+            .and_then(|x| x.ipv4.as_ref().and_then(|x| x.first()))
+        {
+            return Ok(*answer);
+        } else if let Some(cname_domain) = packet.get_cname().and_then(|x| x.cname.as_ref()) {
+            return resolve(cname_domain, TypeField::A);
         } else if let Some(name_server_ip) = packet
             .get_nameserver_record()
             .and_then(|x| x.ipv4.as_ref().and_then(|x| x.first()))
         {
             name_server = *name_server_ip;
+            continue;
         } else if let Some(ns_domain) = packet.get_nameserver().and_then(|x| x.ns_name.as_ref()) {
             name_server = resolve(ns_domain, TypeField::A)?;
+            continue;
         } else {
             log::error!(
                 "No answer found for {} at {}",
