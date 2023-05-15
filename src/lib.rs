@@ -1,9 +1,10 @@
 use std::io::{Cursor, Error, ErrorKind, Read};
+use std::net::Ipv4Addr;
 
 /// TYPE fields are used in resource records.  Note that these
 /// types are a subset of QTYPEs.
 /// See https://datatracker.ietf.org/doc/html/rfc1035#section-3.2.2
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u16)]
 pub enum TypeField {
     /// a host address
@@ -273,6 +274,7 @@ struct DNSRecord {
     ttl: u32,
     /// the record’s content, like the IP address.
     data: Vec<u8>,
+    pub ipv4: Vec<Ipv4Addr>,
 }
 impl DNSRecord {
     pub fn from_bytes(reader: &mut Cursor<&[u8]>) -> Result<DNSRecord, std::io::Error> {
@@ -291,12 +293,21 @@ impl DNSRecord {
         let mut data = vec![0u8; data_len as usize];
         reader.read_exact(&mut data)?;
 
+        let ipv4: Vec<Ipv4Addr> = match type_field {
+            TypeField::A => data
+                .chunks(4)
+                .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
+                .collect(),
+            _ => vec![],
+        };
+
         Ok(DNSRecord {
             name,
             type_field,
             class,
             ttl,
             data,
+            ipv4,
         })
     }
 }
