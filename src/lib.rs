@@ -232,6 +232,8 @@ pub struct DomainName {
     pub string: String,
 }
 
+const MAX_RECURSION_DEPTH: u8 = 5;
+
 impl DomainName {
     pub fn from(domain_name: &str) -> Self {
         let string = String::from(domain_name);
@@ -255,6 +257,7 @@ impl DomainName {
     fn bytes_from_reader_compressed(
         length: u8,
         reader: &mut Cursor<&[u8]>,
+        recursion_depth: u8,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut offset_bytes: [u8; 1] = [0];
         reader.read_exact(&mut offset_bytes)?;
@@ -263,13 +266,24 @@ impl DomainName {
 
         let curr_position = reader.position();
         reader.set_position(pointer as u64);
-        let bytes = DomainName::bytes_from_reader(reader)?;
+        let bytes = DomainName::bytes_from_reader(reader, recursion_depth)?;
         reader.set_position(curr_position);
 
         Ok(bytes)
     }
 
-    fn bytes_from_reader(reader: &mut Cursor<&[u8]>) -> Result<Vec<u8>, std::io::Error> {
+    fn bytes_from_reader(
+        reader: &mut Cursor<&[u8]>,
+        recursion_depth: u8,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        // A malicious actor could exploit our DNS compression code by sending a DNS
+        // response with a DNS compression entry that points to itself, so that read_domain_name would end up in an infinite loop. Fix it to avoid that attack.
+        if recursion_depth > MAX_RECURSION_DEPTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Recursion depth exceeded",
+            ));
+        }
         let mut bytes: Vec<Vec<u8>> = Vec::new();
         let mut should_read = true;
         while should_read {
@@ -280,7 +294,11 @@ impl DomainName {
             // https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.4
             let is_compressed = (length & 0b1100_0000) != 0;
             if is_compressed {
-                bytes.push(DomainName::bytes_from_reader_compressed(length, reader)?);
+                bytes.push(DomainName::bytes_from_reader_compressed(
+                    length,
+                    reader,
+                    recursion_depth + 1,
+                )?);
                 should_read = false;
             } else if length > 0 {
                 let mut buf = vec![0u8; length as usize];
@@ -294,7 +312,7 @@ impl DomainName {
     }
 
     pub fn from_reader(reader: &mut Cursor<&[u8]>) -> Result<Self, std::io::Error> {
-        let bytes: Vec<u8> = DomainName::bytes_from_reader(reader)?;
+        let bytes: Vec<u8> = DomainName::bytes_from_reader(reader, 0)?;
         let string = String::from_utf8(bytes.clone()).map_err(|_| ErrorKind::InvalidData)?;
         Ok(DomainName { string })
     }
